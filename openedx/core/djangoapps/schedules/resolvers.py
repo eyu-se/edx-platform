@@ -13,6 +13,7 @@ from django.urls import reverse
 from edx_ace.recipient import Recipient
 from edx_ace.recipient_resolver import RecipientResolver
 from edx_django_utils.monitoring import function_trace, set_custom_metric
+from edx_when.api import get_user_dates_with_content_due_on_date
 
 from lms.djangoapps.courseware.utils import verified_upgrade_deadline_link, verified_upgrade_link_is_valid
 from lms.djangoapps.discussion.notification_prefs.views import UsernameCipher
@@ -417,6 +418,81 @@ class CourseUpdateResolver(BinnedSchedulesBaseResolver):
                 template_context.update(_get_upsell_information_for_schedule(user, schedule))
 
                 yield (user, schedule.enrollment.course.closest_released_language, template_context, course.self_paced)
+
+
+class CourseUpdateNextAssignmentResolver(BinnedSchedulesBaseResolver):
+    """
+    Send a message to all users whose schedule started at ``self.current_date`` + ``day_offset`` and the
+    course has updates.
+    """
+    log_prefix = 'Course Update'
+    schedule_date_field = 'start_date'
+    num_bins = COURSE_UPDATE_NUM_BINS
+    experience_filter = Q(experience__experience_type=ScheduleExperience.EXPERIENCES.course_updates)
+
+    def send(self, msg_type):
+        for (user, language, context, is_self_paced) in self.schedules_for_bin():
+            msg_type = CourseUpdate() if is_self_paced else InstructorLedCourseUpdate()
+            msg = msg_type.personalize(
+                Recipient(
+                    user.username,
+                    self.override_recipient_email or user.email,
+                ),
+                language,
+                context,
+            )
+            with function_trace('enqueue_send_task'):
+                self.async_send_task.apply_async((self.site.id, str(msg)), retry=False)  # pylint: disable=no-member
+
+    def schedules_for_bin(self):
+        week_num = abs(self.day_offset) // 7  # TODO: Needs to change as part of AA-68 based on expected course duration
+        schedules = self.get_schedules_with_target_date_by_bin_and_orgs(
+            order_by='enrollment__course',
+        )
+
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        user_dates = get_user_dates_with_content_due_on_date(yesterday)
+
+        template_context = get_base_template_context(self.site)
+        for user_date in user_dates:
+            course = user_date.content_date.course
+            print('Course: {}'.format(course))
+            user = user_date.user
+
+            try:
+                week_highlights = get_week_highlights(user, enrollment.course_id, week_num)
+                # TODO: Uncomment below and remove above line when enabling AA-68
+                # week_highlights = get_next_section_highlights(user, enrollment.course_id)
+            except CourseUpdateDoesNotExist:
+                LOG.warning(
+                    u'Weekly highlights for user {} in week {} of course {} does not exist or is disabled'.format(
+                        user, week_num, enrollment.course_id
+                    )
+                )
+                # continue to the next schedule, don't yield an email for this one
+            else:
+                unsubscribe_url = None
+                if (COURSE_UPDATE_SHOW_UNSUBSCRIBE_WAFFLE_SWITCH.is_enabled() and
+                        'bulk_email_optout' in settings.ACE_ENABLED_POLICIES):
+                    unsubscribe_url = reverse('bulk_email_opt_out', kwargs={
+                        'token': UsernameCipher.encrypt(user.username),
+                        'course_id': str(user_date.content_date.course_id),
+                    })
+
+                template_context.update({
+                    'course_name': schedule.enrollment.course.display_name,
+                    'course_url': _get_trackable_course_home_url(user_date.content_date.course_id),
+
+                    'week_num': week_num,
+                    'week_highlights': week_highlights,
+
+                    # This is used by the bulk email optout policy
+                    'course_ids': [str(user_date.content_date.course_id)],
+                    'unsubscribe_url': unsubscribe_url,
+                })
+                template_context.update(_get_upsell_information_for_schedule(user, schedule))
+
+                yield (user, user_date.content_date.course.closest_released_language, template_context, course.self_paced)
 
 
 def _get_trackable_course_home_url(course_id):
