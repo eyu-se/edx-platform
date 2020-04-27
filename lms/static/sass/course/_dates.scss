@@ -30,15 +30,21 @@
     width: 7px;
     height: 7px;
     position: absolute;
-    left: -4px;
+    left: -5px;
     background-color: #2d323e;
     border-radius: 50%;
+    border-style: solid;
+    border-width: thin;
 
-    &.active {
+    &.past-date {
+      background-color: $gray;
+    }
+
+    &.todays-date {
       width: 14px;
       height: 14px;
-      left: -7px;
-      background-color: #2d323e;
+      left: -8px;
+      background-color: #ffdb87;
     }
   }
 
@@ -103,7 +109,29 @@
     font-weight: bold;
     vertical-align: top;
 
-    &.due {
+    &.completed {
+      background-color: #f3f3f4;
+      color: #2d323e;
+    }
+
+    &.due-next {
+      background-color: #686b73;
+      color: $white;
+    }
+
+    &.not-released {
+      background-color: $white;
+      border-color: $gray;
+      border-style: solid;
+      border-width: thin;
+      color: $gray;
+    }
+
+    &.past-due {
+      background-color: #d1d2d4;
+    }
+
+    &.today {
       background-color: #ffdb87;
       color: #2d323e;
     }

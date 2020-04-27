@@ -6,7 +6,7 @@ courseware.
 
 import logging
 from collections import defaultdict, namedtuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 import six
@@ -50,6 +50,7 @@ from openedx.core.djangoapps.site_configuration import helpers as configuration_
 from openedx.core.lib.api.view_utils import LazySequence
 from openedx.features.course_duration_limits.access import AuditExpiredError
 from openedx.features.course_experience import COURSE_ENABLE_UNENROLLED_ACCESS_FLAG, RELATIVE_DATES_FLAG
+from openedx.features.course_experience.utils import get_course_outline_block_tree
 from static_replace import replace_static_urls
 from student.models import CourseEnrollment
 from survey.utils import is_survey_required_and_unanswered
@@ -64,7 +65,9 @@ log = logging.getLogger(__name__)
 
 
 # Used by get_course_assignments below. You shouldn't need to use this type directly.
-_Assignment = namedtuple('Assignment', ['block_key', 'title', 'url', 'date', 'requires_full_access'])
+_Assignment = namedtuple(
+    'Assignment', ['block_key', 'title', 'url', 'date', 'requires_full_access', 'complete', 'past_due']
+)
 
 
 def get_course(course_id, depth=0):
@@ -447,6 +450,8 @@ def get_course_assignment_date_blocks(course, user, request, num_return=None,
         date_block = CourseAssignmentDate(course, user)
         date_block.date = assignment.date
         date_block.requires_full_access = assignment.requires_full_access
+        date_block.complete = assignment.complete
+        date_block.past_due = assignment.past_due
         date_block.set_title(assignment.title, link=assignment.url)
         date_blocks.append(date_block)
     date_blocks = sorted((b for b in date_blocks if b.is_enabled or include_past_dates), key=date_block_key_fn)
@@ -462,30 +467,31 @@ def get_course_assignments(course_key, user, request, include_access=False):
     Each returned object is a namedtuple with fields: block_key, title, url, date, requires_full_access
     """
     store = modulestore()
-    all_course_dates = get_dates_for_course(course_key, user)
     assignments = []
-    for (block_key, date_type), date in all_course_dates.items():
-        if date_type != 'due' or block_key.block_type != 'sequential':
-            continue
+    # Ideally this function is always called with a request being passed in, but because it is also
+    # a subfunction of `get_course_date_blocks` which does not require a request, we are being defensive here.
+    if request:
+        now = datetime.now(pytz.UTC)
+        course_root_block = get_course_outline_block_tree(request, str(course_key), user)
+        for section in course_root_block.get('children', []):
+            for subsection in section.get('children', []):
+                if not subsection.get('due') or not subsection.get('graded'):
+                    continue
 
-        try:
-            item = store.get_item(block_key)
-        except ItemNotFoundError:
-            continue
+                block_key = UsageKey.from_string(subsection.get('id'))
+                requires_full_access = include_access and _requires_full_access(store, user, block_key)
+                title = subsection.get('display_name', _('Assignment'))
 
-        if not item.graded:
-            continue
+                url = None
+                assignment_released = not subsection.get('start') or subsection.get('start') < now
+                if assignment_released:
+                    url = subsection.get('lms_web_url')
 
-        requires_full_access = include_access and _requires_full_access(store, user, block_key)
-        title = item.display_name or _('Assignment')
-
-        url = None
-        assignment_released = not item.start or item.start < datetime.now(pytz.UTC)
-        if assignment_released:
-            url = reverse('jump_to', args=[course_key, block_key])
-            url = request and request.build_absolute_uri(url)
-
-        assignments.append(_Assignment(block_key, title, url, date, requires_full_access))
+                complete = subsection.get('complete')
+                past_due = not complete and subsection.get('due', now + timedelta(1)) < now
+                assignments.append(
+                    _Assignment(block_key, title, url, subsection.get('due'), requires_full_access, complete, past_due)
+                )
 
     return assignments
 

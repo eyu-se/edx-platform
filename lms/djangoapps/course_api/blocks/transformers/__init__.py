@@ -42,6 +42,7 @@ SUPPORTED_FIELDS = [
     SupportedFieldType('display_name', default_value=''),
     SupportedFieldType('graded'),
     SupportedFieldType('format'),
+    SupportedFieldType('start'),
     SupportedFieldType('due'),
     SupportedFieldType('has_score'),
     SupportedFieldType('weight'),
