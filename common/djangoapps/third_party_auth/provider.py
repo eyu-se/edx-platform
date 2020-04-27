@@ -6,6 +6,7 @@ Third-party auth provider configuration API.
 from django.contrib.sites.models import Site
 
 from openedx.core.djangoapps.theming.helpers import get_current_request
+from more_itertools import unique_everseen
 
 from .models import (
     _LTI_BACKENDS,
@@ -37,13 +38,9 @@ class Registry(object):
                 yield provider
         if SAMLConfiguration.is_enabled(Site.objects.get_current(get_current_request()), 'default'):
             idps = SAMLProviderConfig.objects.prefetch_related('site').all()
-            seen_ids = set()
-            for provider in idps:
-                if provider.provider_id in seen_ids:
-                    continue
+            for provider in unique_everseen(idps, key=lambda x: x.slug):
                 if provider.enabled_for_current_site and provider.backend_name in _PSA_SAML_BACKENDS:
                     yield provider
-                seen_ids.add(provider.provider_id)
         for consumer_key in LTIProviderConfig.key_values('lti_consumer_key', flat=True):
             provider = LTIProviderConfig.current(consumer_key)
             if provider.enabled_for_current_site and provider.backend_name in _LTI_BACKENDS:
