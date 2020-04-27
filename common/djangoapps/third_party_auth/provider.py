@@ -36,11 +36,14 @@ class Registry(object):
             if provider.enabled_for_current_site and provider.backend_name in _PSA_OAUTH2_BACKENDS:
                 yield provider
         if SAMLConfiguration.is_enabled(Site.objects.get_current(get_current_request()), 'default'):
-            idp_slugs = SAMLProviderConfig.key_values('slug', flat=True)
-            for idp_slug in idp_slugs:
-                provider = SAMLProviderConfig.current(idp_slug)
+            idps = SAMLProviderConfig.objects.prefetch_related('site').all()
+            seen_ids = set()
+            for provider in idps:
+                if provider.provider_id in seen_ids:
+                    continue
                 if provider.enabled_for_current_site and provider.backend_name in _PSA_SAML_BACKENDS:
                     yield provider
+                seen_ids.add(provider.provider_id)
         for consumer_key in LTIProviderConfig.key_values('lti_consumer_key', flat=True):
             provider = LTIProviderConfig.current(consumer_key)
             if provider.enabled_for_current_site and provider.backend_name in _LTI_BACKENDS:
