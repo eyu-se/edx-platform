@@ -153,7 +153,7 @@ def _get_highlights_for_next_section(sections, course_key):
     yesterday = date.today() - timedelta(days=1)
     for index, sorted_section in enumerate(sorted_sections):
         if sorted_section.due.date() == yesterday and index + 1 < len(sorted_sections):
-            return sections[index + 1]
+            return sections[index + 1], index + 1
     raise CourseUpdateDoesNotExist(
         u"No section found ending on {} for {}".format(
             yesterday, course_key

@@ -13,7 +13,7 @@ from django.urls import reverse
 from edx_ace.recipient import Recipient
 from edx_ace.recipient_resolver import RecipientResolver
 from edx_django_utils.monitoring import function_trace, set_custom_metric
-from edx_when.api import get_user_dates_with_content_due_on_date
+from edx_when.api import get_schedules_with_due_date
 
 from lms.djangoapps.courseware.utils import verified_upgrade_deadline_link, verified_upgrade_link_is_valid
 from lms.djangoapps.discussion.notification_prefs.views import UsernameCipher
@@ -80,6 +80,8 @@ class BinnedSchedulesBaseResolver(PrefixedDebugLoggerMixin, RecipientResolver):
 
     def __attrs_post_init__(self):
         # TODO: in the next refactor of this task, pass in current_datetime instead of reproducing it here
+        print('target_datetime: {}'.format(self.target_datetime))
+        print('day_offset: {}'.format(self.day_offset))
         self.current_datetime = self.target_datetime - datetime.timedelta(days=self.day_offset)
 
     def send(self, msg_type):
@@ -274,6 +276,7 @@ def _get_datetime_beginning_of_day(dt):
     """
     Truncates hours, minutes, seconds, and microseconds to zero on given datetime.
     """
+    print('dt: {}'.format(dt))
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -373,7 +376,7 @@ class CourseUpdateResolver(BinnedSchedulesBaseResolver):
                 self.async_send_task.apply_async((self.site.id, str(msg)), retry=False)  # pylint: disable=no-member
 
     def schedules_for_bin(self):
-        week_num = abs(self.day_offset) // 7  # TODO: Needs to change as part of AA-68 based on expected course duration
+        week_num = abs(self.day_offset) // 7
         schedules = self.get_schedules_with_target_date_by_bin_and_orgs(
             order_by='enrollment__course',
         )
@@ -386,8 +389,6 @@ class CourseUpdateResolver(BinnedSchedulesBaseResolver):
 
             try:
                 week_highlights = get_week_highlights(user, enrollment.course_id, week_num)
-                # TODO: Uncomment below and remove above line when enabling AA-68
-                # week_highlights = get_next_section_highlights(user, enrollment.course_id)
             except CourseUpdateDoesNotExist:
                 LOG.warning(
                     u'Weekly highlights for user {} in week {} of course {} does not exist or is disabled'.format(
@@ -420,18 +421,25 @@ class CourseUpdateResolver(BinnedSchedulesBaseResolver):
                 yield (user, schedule.enrollment.course.closest_released_language, template_context, course.self_paced)
 
 
-class CourseUpdateNextAssignmentResolver(BinnedSchedulesBaseResolver):
+@attr.s
+class CourseUpdateNextSectionResolver(PrefixedDebugLoggerMixin, RecipientResolver):
     """
-    Send a message to all users whose schedule started at ``self.current_date`` + ``day_offset`` and the
-    course has updates.
+    TODO: need to fill this out with comment
     """
+    async_send_task = attr.ib()
+    site = attr.ib()
+    target_datetime = attr.ib()
+    course_key = attr.ib()
+    override_recipient_email = attr.ib(default=None)
+
     log_prefix = 'Course Update'
     schedule_date_field = 'start_date'
     num_bins = COURSE_UPDATE_NUM_BINS
     experience_filter = Q(experience__experience_type=ScheduleExperience.EXPERIENCES.course_updates)
 
-    def send(self, msg_type):
-        for (user, language, context, is_self_paced) in self.schedules_for_bin():
+    def send(self):
+        print('in CourseUpdateNextSectionResolver send')
+        for (user, language, context, is_self_paced) in self.get_schedules():
             msg_type = CourseUpdate() if is_self_paced else InstructorLedCourseUpdate()
             msg = msg_type.personalize(
                 Recipient(
@@ -442,31 +450,26 @@ class CourseUpdateNextAssignmentResolver(BinnedSchedulesBaseResolver):
                 context,
             )
             with function_trace('enqueue_send_task'):
-                self.async_send_task.apply_async((self.site.id, str(msg)), retry=False)  # pylint: disable=no-member
+                self.async_send_task.apply_async((self.site.id, str(msg)), retry=False)
 
-    def schedules_for_bin(self):
-        week_num = abs(self.day_offset) // 7  # TODO: Needs to change as part of AA-68 based on expected course duration
-        schedules = self.get_schedules_with_target_date_by_bin_and_orgs(
-            order_by='enrollment__course',
-        )
-
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        user_dates = get_user_dates_with_content_due_on_date(yesterday)
+    def get_schedules(self):
+        print('in CourseUpdateNextSectionResolver schedules_for_bin')
+        print('target date: {}'.format(self.target_datetime))
+        print('course_key: {}'.format(self.course_key))
+        schedules = get_schedules_with_due_date(self.course_key, self.target_datetime)
 
         template_context = get_base_template_context(self.site)
-        for user_date in user_dates:
-            course = user_date.content_date.course
-            print('Course: {}'.format(course))
-            user = user_date.user
+        for schedule in schedules:
+            enrollment = schedule.enrollment
+            course = schedule.enrollment.course
+            user = enrollment.user
 
             try:
-                week_highlights = get_week_highlights(user, enrollment.course_id, week_num)
-                # TODO: Uncomment below and remove above line when enabling AA-68
-                # week_highlights = get_next_section_highlights(user, enrollment.course_id)
+                week_highlights, week_num = get_next_section_highlights(user, course.id)
             except CourseUpdateDoesNotExist:
                 LOG.warning(
-                    u'Weekly highlights for user {} in week {} of course {} does not exist or is disabled'.format(
-                        user, week_num, enrollment.course_id
+                    u'Weekly highlights for user {} of course {} does not exist or is disabled'.format(
+                        user, course.id
                     )
                 )
                 # continue to the next schedule, don't yield an email for this one
@@ -476,23 +479,23 @@ class CourseUpdateNextAssignmentResolver(BinnedSchedulesBaseResolver):
                         'bulk_email_optout' in settings.ACE_ENABLED_POLICIES):
                     unsubscribe_url = reverse('bulk_email_opt_out', kwargs={
                         'token': UsernameCipher.encrypt(user.username),
-                        'course_id': str(user_date.content_date.course_id),
+                        'course_id': str(enrollment.course_id),
                     })
 
                 template_context.update({
-                    'course_name': schedule.enrollment.course.display_name,
-                    'course_url': _get_trackable_course_home_url(user_date.content_date.course_id),
+                    'course_name': course.display_name,
+                    'course_url': _get_trackable_course_home_url(enrollment.course_id),
 
-                    'week_num': week_num,
+                    # 'week_num': week_num,  # TODO: Figure out what this week_num is used for
                     'week_highlights': week_highlights,
 
                     # This is used by the bulk email optout policy
-                    'course_ids': [str(user_date.content_date.course_id)],
+                    'course_ids': [str(enrollment.course_id)],
                     'unsubscribe_url': unsubscribe_url,
                 })
                 template_context.update(_get_upsell_information_for_schedule(user, schedule))
 
-                yield (user, user_date.content_date.course.closest_released_language, template_context, course.self_paced)
+                yield (user, enrollment.course.closest_released_language, template_context, course.self_paced)
 
 
 def _get_trackable_course_home_url(course_id):

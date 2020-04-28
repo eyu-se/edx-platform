@@ -38,6 +38,7 @@ class SendEmailBaseCommand(PrefixedDebugLoggerMixin, BaseCommand):
         )
 
     def handle(self, *args, **options):
+        print('in handle')
         self.log_debug('Args = %r', options)
 
         num_weeks = options.get('weeks')
@@ -58,6 +59,7 @@ class SendEmailBaseCommand(PrefixedDebugLoggerMixin, BaseCommand):
         self.send_emails(site, current_date, override_recipient_email)
 
     def enqueue(self, day_offset, site, current_date, override_recipient_email=None):
+        print('in SendEmailBaseCommand enqueue')
         self.async_send_task.enqueue(
             site,
             current_date,
@@ -66,5 +68,6 @@ class SendEmailBaseCommand(PrefixedDebugLoggerMixin, BaseCommand):
         )
 
     def send_emails(self, *args, **kwargs):
+        print('in SendEmailBaseCommand send_emails')
         for offset in self.offsets:
             self.enqueue(offset, *args, **kwargs)
